@@ -22,7 +22,7 @@ Runs entirely locally: there are no servers, no API keys, and no network request
 - Click the extension's toolbar icon to show or hide the panel.
 
 ## Limitations
-- The overlay follows the map position in the page URL. It moves live while you drag. When you zoom with the scroll wheel it hides briefly, then redraws once the map settles.
-- Satellite view is calibrated automatically and lines up well. It may be slightly off at very low zoom with Globe view on.
+- The overlay follows the map position in the page URL and is redrawn every time the URL changes, so it tracks live panning and zooming (including scroll-wheel zoom) without hiding.
+- Map and satellite views use the same Web Mercator projection, so lines stay aligned in both, and the overlay is redrawn automatically when the map is resized.
 - Tilted or rotated 3D views and Street View are not supported. Reset to a flat, north-up view to see the overlay.
 - Only `google.com/maps` is supported. To use a country domain, add it to `matches` in `manifest.json`, for example `"https://www.google.co.uk/maps*"`.

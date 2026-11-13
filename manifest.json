@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "GPX Overlay for Google Maps",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Overlay one or many local GPX files on Google Maps. Runs fully locally.",
   "permissions": ["storage", "unlimitedStorage"],
   "background": { "service_worker": "background.js" },

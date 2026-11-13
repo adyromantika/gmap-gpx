@@ -7,18 +7,16 @@
 
   const state = {
     tracks: [],
-    settings: { width: 4, opacity: 0.9, showWaypoints: true, showKm: false, showArrows: false, gradient: false, satK: 1 },
+    settings: { width: 4, opacity: 0.9, showWaypoints: true, showKm: false, showArrows: false, gradient: false },
     panel: { visible: true, collapsed: false },
   };
 
   let host = null;
   let canvas = null;
   let ctx = null;
+  let mapRect = null;
   let lastHref = "";
   let lastSize = "";
-  let lastView = null;
-  let drag = null;
-  let hideTimer = null;
   let statusMsg = "";
   let hitTracks = [];
   let tip = null;
@@ -69,24 +67,11 @@
     return { lat, lng, value: parseFloat(zm[1]), unit: zm[2] };
   }
 
+  // Google's "m" URLs give the viewport height in metres, so the conversion is exact.
   function resolveZoom(v, h) {
     if (v.unit === "z") return v.value;
-    const mpp = v.value / (h * state.settings.satK);
+    const mpp = v.value / Math.max(1, h);
     return Math.log2((156543.03392 * Math.cos((v.lat * Math.PI) / 180)) / mpp);
-  }
-
-  // When Google switches between "z" and "m" units at the same spot, learn the scale factor.
-  function maybeCalibrate(prev, cur, h) {
-    if (!prev || prev.unit === cur.unit) return;
-    if (Math.abs(prev.lat - cur.lat) > 1e-4 || Math.abs(prev.lng - cur.lng) > 1e-4) return;
-    const z = prev.unit === "z" ? prev.value : cur.value;
-    const meters = prev.unit === "m" ? prev.value : cur.value;
-    const mppAtZ = (156543.03392 * Math.cos((cur.lat * Math.PI) / 180)) / 2 ** z;
-    const k = meters / (h * mppAtZ);
-    if (k > 0.2 && k < 5) {
-      state.settings.satK = k;
-      saveSettings();
-    }
   }
 
   // ---------- GPX parsing ----------
@@ -167,54 +152,66 @@
 
   // ---------- Overlay canvas ----------
 
-  // Google's class names are obfuscated, so use the parent of the largest map canvas.
-  function findHost() {
-    const legacy = document.querySelector("#scene, .widget-scene");
-    if (legacy) return legacy;
+  // Google's class names are obfuscated. The map is the largest <canvas> on the
+  // page; attach the overlay to its parent and match its exact box. Layout size is
+  // used for the comparison so a canvas that is briefly transform-scaled during a
+  // zoom animation cannot win.
+  function findMapCanvas() {
     let best = null, bestArea = 0;
     for (const c of document.getElementsByTagName("canvas")) {
       if (c === canvas) continue;
-      const area = c.clientWidth * c.clientHeight;
+      const area = (c.clientWidth || 1) * (c.clientHeight || 1);
       if (area > bestArea) { bestArea = area; best = c; }
     }
-    return bestArea > 40000 ? best.parentElement : null;
+    return bestArea > 40000 ? best : null;
   }
 
   function ensureCanvas() {
-    const h = findHost();
-    if (canvas && canvas.isConnected && h === host) return;
-    host = h;
+    const map = findMapCanvas();
+    host = map ? map.parentElement : document.querySelector("#scene, .widget-scene");
     if (!canvas) {
       canvas = document.createElement("canvas");
       canvas.id = "gpx-overlay-canvas";
-      canvas.style.cssText = "pointer-events:none;top:0;left:0;width:100%;height:100%;z-index:1;transition:opacity .15s;";
+      canvas.style.cssText = "pointer-events:none;z-index:1;";
       ctx = canvas.getContext("2d");
     }
     if (host) {
       if (getComputedStyle(host).position === "static") host.style.position = "relative";
+      const hr = host.getBoundingClientRect();
+      const mr = (map || host).getBoundingClientRect();
+      // Cancel any scale the host itself inherits, so the overlay covers the map
+      // exactly in the host's local coordinate space.
+      const sx = host.offsetWidth ? hr.width / host.offsetWidth : 1;
+      const sy = host.offsetHeight ? hr.height / host.offsetHeight : 1;
       canvas.style.position = "absolute";
-      host.appendChild(canvas);
+      canvas.style.left = (mr.left - hr.left - host.clientLeft) / sx + "px";
+      canvas.style.top = (mr.top - hr.top - host.clientTop) / sy + "px";
+      canvas.style.width = mr.width / sx + "px";
+      canvas.style.height = mr.height / sy + "px";
+      if (canvas.parentElement !== host) host.appendChild(canvas);
+      mapRect = { w: Math.round(mr.width) || window.innerWidth, h: Math.round(mr.height) || window.innerHeight };
     } else {
       canvas.style.position = "fixed";
-      document.body.appendChild(canvas);
+      canvas.style.left = "0";
+      canvas.style.top = "0";
+      canvas.style.width = "100%";
+      canvas.style.height = "100%";
+      if (canvas.parentElement !== document.body) document.body.appendChild(canvas);
+      mapRect = { w: window.innerWidth, h: window.innerHeight };
     }
+    return mapRect;
   }
 
   function draw() {
-    ensureCanvas();
+    const { w, h } = ensureCanvas();
     lastHref = location.href;
-    const rect = (host || document.documentElement).getBoundingClientRect();
-    const w = Math.round(rect.width) || window.innerWidth;
-    const h = Math.round(rect.height) || window.innerHeight;
     lastSize = w + "x" + h;
     const dpr = window.devicePixelRatio || 1;
     if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
       canvas.width = w * dpr;
       canvas.height = h * dpr;
     }
-    canvas.style.transform = "";
     canvas.style.opacity = "1";
-    if (drag) { drag.x += drag.dx; drag.y += drag.dy; drag.dx = drag.dy = 0; }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
     hitTracks = [];
@@ -227,9 +224,7 @@
       if (statusMsg !== prevStatus) renderStatus();
       return;
     }
-    maybeCalibrate(lastView, v, h);
-    lastView = v;
-    statusMsg = v.unit === "m" ? "Satellite view: alignment is approximate" : "";
+    statusMsg = "";
     if (statusMsg !== prevStatus) renderStatus();
 
     const zoom = resolveZoom(v, h);
@@ -438,7 +433,8 @@
 
   function fitBounds(bounds) {
     if (!bounds) return;
-    const rect = (host || document.documentElement).getBoundingClientRect();
+    const map = findMapCanvas();
+    const rect = map ? map.getBoundingClientRect() : (host || document.documentElement).getBoundingClientRect();
     const w = rect.width || window.innerWidth;
     const h = rect.height || window.innerHeight;
     const [x1, y1] = project(bounds[2], bounds[1]);
@@ -587,31 +583,50 @@
     return host ? host.contains(e.target) : !(panelHost && panelHost.contains(e.target));
   }
 
+  // While dragging, the map's URL can lag a little behind the pointer. Translate
+  // the overlay by the movement since the last URL update, and re-anchor as soon
+  // as the URL changes (see sync()). Movement never accumulates across updates,
+  // so the overlay cannot drift. After release the offset is kept briefly so the
+  // map can publish its final position, then it is dropped.
+  let pointer = null;
+  let dragBase = null;
+  let dragging = false;
+  let releaseTimer = 0;
+
+  function rebaseDrag() { dragBase = pointer ? { x: pointer.x, y: pointer.y } : null; }
+
+  function applyDragOffset() {
+    if (!canvas) return;
+    canvas.style.transform = dragBase && pointer
+      ? `translate(${pointer.x - dragBase.x}px, ${pointer.y - dragBase.y}px)`
+      : "";
+  }
+
+  function endDrag() {
+    if (!dragging) return;
+    dragging = false;
+    clearTimeout(releaseTimer);
+    releaseTimer = setTimeout(() => {
+      pointer = dragBase = null;
+      applyDragOffset();
+    }, 400);
+  }
+
   window.addEventListener("pointerdown", (e) => {
-    if (e.button === 0 && inMap(e)) drag = { x: e.clientX, y: e.clientY, dx: 0, dy: 0 };
+    if (e.button !== 0 || !inMap(e)) return;
+    dragging = true;
+    clearTimeout(releaseTimer);
+    pointer = { x: e.clientX, y: e.clientY };
+    rebaseDrag();
   }, true);
   window.addEventListener("pointermove", (e) => {
-    if (!drag || !canvas) return;
-    if (!(e.buttons & 1)) { drag = null; return; }
-    drag.dx = e.clientX - drag.x;
-    drag.dy = e.clientY - drag.y;
-    canvas.style.transform = `translate(${drag.dx}px, ${drag.dy}px)`;
+    if (!dragging) return;
+    if (!(e.buttons & 1)) { endDrag(); return; }
+    pointer = { x: e.clientX, y: e.clientY };
+    applyDragOffset();
   }, true);
-  window.addEventListener("pointerup", () => {
-    if (!drag) return;
-    drag = null;
-    clearTimeout(hideTimer);
-    hideTimer = setTimeout(draw, 1500);
-  }, true);
-
-  const hideWhileZooming = (e) => {
-    if (!canvas || !inMap(e)) return;
-    canvas.style.opacity = "0";
-    clearTimeout(hideTimer);
-    hideTimer = setTimeout(draw, 1200);
-  };
-  window.addEventListener("wheel", hideWhileZooming, { capture: true, passive: true });
-  window.addEventListener("dblclick", hideWhileZooming, true);
+  window.addEventListener("pointerup", endDrag, true);
+  window.addEventListener("pointercancel", endDrag, true);
 
   window.addEventListener("dragover", (e) => {
     if (e.dataTransfer && Array.from(e.dataTransfer.types).includes("Files")) e.preventDefault();
@@ -684,7 +699,7 @@
   }
 
   function onHover(e) {
-    if (!hitTracks.length || drag || !canvas || canvas.style.opacity === "0" || !inMap(e)) { hideTooltip(); return; }
+    if (!hitTracks.length || dragging || !canvas || canvas.style.opacity === "0" || !inMap(e)) { hideTooltip(); return; }
     const rect = canvas.getBoundingClientRect();
     const hits = hitTest(e.clientX - rect.left, e.clientY - rect.top, Math.max(8, state.settings.width + 4));
     if (!hits.length) { hideTooltip(); return; }
@@ -735,6 +750,30 @@
 
   // ---------- Init ----------
 
+  // Google rewrites the URL as the map moves, so each change gives us an exact
+  // camera to redraw from. Between changes the pointer offset bridges the gap.
+  // This runs every frame (instead of on a timer) so a pan is never drawn late.
+  let checkTick = 0;
+
+  function sync() {
+    requestAnimationFrame(sync);
+    if (location.href !== lastHref) {
+      draw();
+      if (pointer) { rebaseDrag(); applyDragOffset(); }
+      return;
+    }
+    // Every ~10 frames, confirm the map canvas and its size are still current
+    // (Google can replace the canvas or resize it without touching the URL).
+    if (dragging || ++checkTick < 10) return;
+    checkTick = 0;
+    const map = findMapCanvas();
+    const nextHost = map ? map.parentElement : document.querySelector("#scene, .widget-scene");
+    if (!nextHost) { draw(); return; }
+    if (nextHost !== host || !canvas || !canvas.isConnected) { draw(); return; }
+    const r = (map || nextHost).getBoundingClientRect();
+    if (Math.round(r.width) + "x" + Math.round(r.height) !== lastSize) draw();
+  }
+
   chrome.storage.local.get(["tracks", "settings", "panel"]).then((d) => {
     if (Array.isArray(d.tracks)) state.tracks = d.tracks;
     if (d.settings) Object.assign(state.settings, d.settings);
@@ -742,10 +781,6 @@
     buildPanel();
     renderPanel();
     draw();
-    setInterval(() => {
-      const rect = (host || document.documentElement).getBoundingClientRect();
-      const size = Math.round(rect.width) + "x" + Math.round(rect.height);
-      if (location.href !== lastHref || size !== lastSize || !canvas.isConnected || findHost() !== host) draw();
-    }, 100);
+    sync();
   });
 })();
