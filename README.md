@@ -3,6 +3,8 @@
 Draws one or more local GPX files (tracks, routes, waypoints) over Google Maps.
 Runs entirely locally: there are no servers, no API keys, and no network requests. Tracks are saved in `chrome.storage.local`.
 
+<img width="1231" height="912" alt="image" src="https://github.com/user-attachments/assets/62cae19d-ef89-4ce5-9ab0-119b082716c4" />
+
 ## Install
 1. Open `chrome://extensions` and turn on **Developer mode**.
 2. Click **Load unpacked** and select this folder.
